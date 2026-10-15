@@ -1,12 +1,12 @@
 """Visualization utilities for the time series forecasting app."""
-"""Enhanced visualization utilities for the time series forecasting app."""
 
-import streamlit as st
+from typing import Dict, List
+
 import matplotlib.pyplot as plt
-import seaborn as sns
 import pandas as pd
-import numpy as np
-from typing import List, Dict
+import plotly.graph_objects as go
+import seaborn as sns
+import streamlit as st
 
 
 class DataVisualizer:
@@ -26,7 +26,7 @@ class DataVisualizer:
         ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
         plt.tight_layout()
         st.pyplot(fig)
-        plt.close()
+        plt.close(fig)
 
     def plot_predictions_with_intervals(self, time_index, actual, predictions,
                                         lower=None, upper=None, title="Model Predictions"):
@@ -51,7 +51,7 @@ class DataVisualizer:
         ax.legend()
         plt.tight_layout()
         st.pyplot(fig)
-        plt.close()
+        plt.close(fig)
 
     def plot_forecast(self, history, forecast, intervals=None, title="Forecast"):
         """Plot historical data with forecast."""
@@ -77,7 +77,7 @@ class DataVisualizer:
         ax.legend()
         plt.tight_layout()
         st.pyplot(fig)
-        plt.close()
+        plt.close(fig)
 
     def plot_model_diagnostics(self, residuals, predictions, actual):
         """Plot model diagnostic charts."""
@@ -108,7 +108,7 @@ class DataVisualizer:
 
         plt.tight_layout()
         st.pyplot(fig)
-        plt.close()
+        plt.close(fig)
 
     def plot_feature_importance(self, importance_df):
         """Plot feature importance."""
@@ -121,37 +121,57 @@ class DataVisualizer:
         ax.set_xlabel('Importance Score', fontsize=12)
         plt.tight_layout()
         st.pyplot(fig)
-        plt.close()
+        plt.close(fig)
 
-    def plot_model_comparison(self, results: List[Dict], metrics=['MAE', 'RMSE', 'MAPE']):
-        """Plot model comparison charts."""
-        # Convert results to DataFrame
+    def plot_model_comparison(self, results: List[Dict], metrics=('MAE', 'RMSE', 'MAPE')):
+        """Plot model comparison charts and return the results table."""
         if not results:
             st.warning("No results to display")
             return None
 
         results_df = pd.DataFrame(results)
+        metrics = [m for m in metrics if m in results_df.columns]
 
-        # Create bar plots for each metric
-        n_metrics = len(metrics)
-        fig, axes = plt.subplots(n_metrics, 1, figsize=(10, 5 * n_metrics))
-        if n_metrics == 1:
-            axes = [axes]
-
-        for ax, metric in zip(axes, metrics):
-            if metric in results_df.columns:
-                results_df.plot(kind='bar', y=metric, ax=ax)
-                ax.set_title(f'Model Comparison - {metric}')
-                ax.set_xlabel('Models')
-                ax.set_ylabel(metric)
-                plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
-                ax.grid(True, alpha=0.3)
+        fig, axes = plt.subplots(1, len(metrics), figsize=(5 * len(metrics), 4), squeeze=False)
+        for ax, metric in zip(axes[0], metrics):
+            ax.bar(results_df['Model'], results_df[metric], color='steelblue')
+            ax.set_title(f"{metric} (%)" if metric == 'MAPE' else metric)
+            plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
+            ax.grid(True, axis='y', alpha=0.3)
 
         plt.tight_layout()
         st.pyplot(fig)
-        plt.close()
+        plt.close(fig)
 
         return results_df
+
+    def plot_test_predictions(self, actual: pd.Series, predictions: Dict[str, pd.Series], history=None,
+                              interval=None):
+        """
+        Interactive plot of each model's one-step-ahead test predictions against the actual values.
+
+        Args:
+            interval: Optional (model_name, lower, upper, level) to draw as a shaded band
+        """
+        fig = go.Figure()
+        if history is not None:
+            fig.add_trace(go.Scatter(x=history.index, y=history.values, name='History',
+                                     line=dict(color='lightgray')))
+        if interval is not None:
+            name, lower, upper, level = interval
+            fig.add_trace(go.Scatter(x=upper.index, y=upper.values, line=dict(width=0),
+                                     showlegend=False, hoverinfo='skip'))
+            fig.add_trace(go.Scatter(x=lower.index, y=lower.values, line=dict(width=0),
+                                     fill='tonexty', fillcolor='rgba(31, 119, 180, 0.2)',
+                                     name=f'{name} {level:.0%} interval', hoverinfo='skip'))
+        fig.add_trace(go.Scatter(x=actual.index, y=actual.values, name='Actual',
+                                 line=dict(color='black', width=2)))
+        for name, preds in predictions.items():
+            fig.add_trace(go.Scatter(x=preds.index, y=preds.values, name=name,
+                                     line=dict(dash='dot')))
+        fig.update_layout(title='Test Period: Actual vs. One-Step-Ahead Predictions',
+                          xaxis_title='Time', yaxis_title=actual.name, hovermode='x unified')
+        st.plotly_chart(fig, width='stretch')
 
     def plot_training_history(self, history):
         """Plot training history for deep learning models."""
@@ -184,7 +204,7 @@ class DataVisualizer:
 
         plt.tight_layout()
         st.pyplot(fig)
-        plt.close()
+        plt.close(fig)
 
     def display_data_info(self, df):
         """Display enhanced dataset information."""
@@ -202,7 +222,7 @@ class DataVisualizer:
         # Data types and missing values
         st.subheader("Data Types and Missing Values")
         dtypes_df = pd.DataFrame({
-            'Data Type': df.dtypes,
+            'Data Type': df.dtypes.astype(str),
             'Non-Null Count': df.count(),
             'Null Count': df.isnull().sum(),
             'Null Percentage': (df.isnull().sum() / len(df) * 100).round(2)
@@ -219,8 +239,8 @@ class DataVisualizer:
             freq = pd.infer_freq(df.index)
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("Start Date", df.index[0])
+                st.metric("Start Date", str(df.index[0].date()))
             with col2:
-                st.metric("End Date", df.index[-1])
+                st.metric("End Date", str(df.index[-1].date()))
             with col3:
                 st.metric("Frequency", str(freq) if freq else "Irregular")

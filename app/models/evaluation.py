@@ -3,8 +3,17 @@
 import numpy as np
 import pandas as pd
 import streamlit as st
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from scipy import stats
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+
+def mape(actual, predicted):
+    """Mean absolute percentage error, ignoring points where the actual value is zero."""
+    actual, predicted = np.asarray(actual, dtype=float), np.asarray(predicted, dtype=float)
+    nonzero = actual != 0
+    if not nonzero.any():
+        return np.nan
+    return np.mean(np.abs((actual[nonzero] - predicted[nonzero]) / actual[nonzero])) * 100
 
 
 class ModelEvaluator:
@@ -12,138 +21,122 @@ class ModelEvaluator:
 
     @staticmethod
     def calculate_metrics(actual, predicted):
-        """Calculate comprehensive set of evaluation metrics."""
-        try:
-            metrics = {
-                'MAE': mean_absolute_error(actual, predicted),
-                'RMSE': np.sqrt(mean_squared_error(actual, predicted)),
-                'MAPE': np.mean(np.abs((actual - predicted) / actual)) * 100,
-                'R2': r2_score(actual, predicted)
-            }
+        """Calculate a comprehensive set of evaluation metrics."""
+        actual, predicted = np.asarray(actual, dtype=float), np.asarray(predicted, dtype=float)
+        residuals = actual - predicted
 
-            # Additional metrics
-            residuals = actual - predicted
-            metrics.update({
-                'Mean Error': np.mean(residuals),
-                'Std Error': np.std(residuals),
-                'Skewness': stats.skew(residuals),
-                'Kurtosis': stats.kurtosis(residuals)
-            })
-
-            return metrics
-
-        except Exception as e:
-            st.error(f"Error calculating metrics: {str(e)}")
-            return None
+        return {
+            'MAE': mean_absolute_error(actual, predicted),
+            'RMSE': np.sqrt(mean_squared_error(actual, predicted)),
+            'MAPE': mape(actual, predicted),
+            'R2': r2_score(actual, predicted),
+            'Mean Error': np.mean(residuals),
+            'Std Error': np.std(residuals),
+            'Skewness': stats.skew(residuals),
+            'Kurtosis': stats.kurtosis(residuals),
+        }
 
     @staticmethod
     def test_residuals(residuals):
         """Perform statistical tests on residuals."""
-        try:
-            tests = {}
+        from statsmodels.stats.diagnostic import acorr_ljungbox, het_breuschpagan
 
-            # Normality test
-            stat, p_value = stats.normaltest(residuals)
-            tests['Normality'] = {
-                'statistic': stat,
-                'p_value': p_value,
-                'null_hypothesis': 'Residuals are normally distributed'
-            }
+        residuals = np.asarray(residuals, dtype=float)
+        tests = {}
 
-            # Autocorrelation test
-            from statsmodels.stats.diagnostic import acorr_ljungbox
-            lbvalue, p_value = acorr_ljungbox(residuals, lags=10, return_df=False)
-            tests['Autocorrelation'] = {
-                'statistic': lbvalue[0],
-                'p_value': p_value[0],
-                'null_hypothesis': 'No autocorrelation present'
-            }
+        stat, p_value = stats.normaltest(residuals)
+        tests['Normality'] = {
+            'statistic': stat,
+            'p_value': p_value,
+            'null_hypothesis': 'Residuals are normally distributed'
+        }
 
-            # Heteroscedasticity test
-            from statsmodels.stats.diagnostic import het_breuschpagan
-            bp_test = het_breuschpagan(residuals, np.ones((len(residuals), 1)))
-            tests['Heteroscedasticity'] = {
-                'statistic': bp_test[0],
-                'p_value': bp_test[1],
-                'null_hypothesis': 'Homoscedasticity present'
-            }
+        lb = acorr_ljungbox(residuals, lags=[10])
+        tests['Autocorrelation'] = {
+            'statistic': lb['lb_stat'].iloc[0],
+            'p_value': lb['lb_pvalue'].iloc[0],
+            'null_hypothesis': 'No autocorrelation present (Ljung-Box, 10 lags)'
+        }
 
-            return tests
+        # Regress squared residuals on a trend to detect changing variance over time
+        exog = np.column_stack([np.ones(len(residuals)), np.arange(len(residuals))])
+        bp_test = het_breuschpagan(residuals, exog)
+        tests['Heteroscedasticity'] = {
+            'statistic': bp_test[0],
+            'p_value': bp_test[1],
+            'null_hypothesis': 'Homoscedasticity present (Breusch-Pagan vs. time)'
+        }
 
-        except Exception as e:
-            st.error(f"Error performing residual tests: {str(e)}")
-            return None
+        return tests
 
     @staticmethod
-    def evaluate_forecasts(forecasts, actuals):
-        """Evaluate multiple forecast horizons."""
-        try:
-            horizon_metrics = []
+    def diebold_mariano(errors1, errors2):
+        """
+        Diebold-Mariano test for equal one-step-ahead forecast accuracy (squared-error loss).
 
-            for h in range(len(forecasts)):
-                metrics = {
-                    'Horizon': h + 1,
-                    'MAE': mean_absolute_error(actuals[h:], forecasts[h:]),
-                    'RMSE': np.sqrt(mean_squared_error(actuals[h:], forecasts[h:])),
-                    'MAPE': np.mean(np.abs((actuals[h:] - forecasts[h:]) / actuals[h:])) * 100
-                }
-                horizon_metrics.append(metrics)
+        Returns:
+            tuple: (statistic, p_value). A negative statistic means model 1 is more accurate.
+        """
+        d = np.asarray(errors1, dtype=float) ** 2 - np.asarray(errors2, dtype=float) ** 2
+        var = np.var(d, ddof=1)
+        if var == 0:
+            return 0.0, 1.0
+        dm_stat = np.mean(d) / np.sqrt(var / len(d))
+        p_value = 2 * stats.norm.sf(abs(dm_stat))
+        return dm_stat, p_value
 
-            return pd.DataFrame(horizon_metrics)
+    @classmethod
+    def compare_models(cls, models_results):
+        """
+        Compare models pairwise with the Diebold-Mariano test.
 
-        except Exception as e:
-            st.error(f"Error evaluating forecasts: {str(e)}")
+        Args:
+            models_results (dict): {model_name: {'residuals': array}} on the same test period
+        """
+        names = list(models_results.keys())
+        if len(names) < 2:
             return None
 
-    @staticmethod
-    def compare_models(models_results):
-        """Compare multiple models statistically."""
-        try:
-            if len(models_results) < 2:
-                return "Need at least two models to compare"
+        comparisons = []
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                model1, model2 = names[i], names[j]
+                dm_stat, dm_pvalue = cls.diebold_mariano(
+                    models_results[model1]['residuals'],
+                    models_results[model2]['residuals']
+                )
+                if dm_pvalue >= 0.05:
+                    better = 'No significant difference'
+                else:
+                    better = model1 if dm_stat < 0 else model2
 
-            comparisons = []
-            names = list(models_results.keys())
+                comparisons.append({
+                    'Model 1': model1,
+                    'Model 2': model2,
+                    'DM Statistic': dm_stat,
+                    'p-value': dm_pvalue,
+                    'More Accurate (5%)': better
+                })
 
-            for i in range(len(names)):
-                for j in range(i + 1, len(names)):
-                    model1, model2 = names[i], names[j]
+        return pd.DataFrame(comparisons)
 
-                    # Perform Diebold-Mariano test
-                    from statsmodels.stats.diagnostic import compare_forecast_accuracy
-                    dm_stat, dm_pvalue = compare_forecast_accuracy(
-                        models_results[model1]['residuals'],
-                        models_results[model2]['residuals']
-                    )
-
-                    comparisons.append({
-                        'Model 1': model1,
-                        'Model 2': model2,
-                        'DM Statistic': dm_stat,
-                        'p-value': dm_pvalue,
-                        'Better Model': model1 if dm_stat < 0 else model2 if dm_stat > 0 else 'Equal'
-                    })
-
-            return pd.DataFrame(comparisons)
-
-        except Exception as e:
-            st.error(f"Error comparing models: {str(e)}")
-            return None
-
-    def display_evaluation_results(self, metrics, tests=None, horizon_metrics=None):
+    def display_evaluation_results(self, metrics, tests=None):
         """Display evaluation results in Streamlit."""
-        st.subheader("Model Performance Metrics")
-
-        # Display basic metrics
         cols = st.columns(4)
-        for i, (metric, value) in enumerate(metrics.items()):
-            cols[i % 4].metric(metric, f"{value:.4f}")
+        for i, metric in enumerate(['MAE', 'RMSE', 'MAPE', 'R2']):
+            value = metrics.get(metric, np.nan)
+            label = f"{metric} (%)" if metric == 'MAPE' else metric
+            cols[i].metric(label, f"{value:.4f}")
 
-        # Display statistical tests if available
         if tests:
-            st.subheader("Statistical Tests")
-            for test_name, test_results in tests.items():
-                with st.expander(f"{test_name} Test"):
-                    st.write(f"Null Hypothesis: {test_results['null_hypothesis']}")
-                    st.write(f"Test Statistic: {test_results['statistic']:.4f}")
-                    st.write(f"P-value: {test_results['p_value']:.4f}")
+            rows = [
+                {
+                    'Test': name,
+                    'Null Hypothesis': result['null_hypothesis'],
+                    'Statistic': result['statistic'],
+                    'p-value': result['p_value'],
+                }
+                for name, result in tests.items()
+            ]
+            st.caption("Residual diagnostics")
+            st.dataframe(pd.DataFrame(rows), hide_index=True)

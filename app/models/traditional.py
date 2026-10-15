@@ -1,12 +1,33 @@
 """Traditional time series model implementations."""
 
 import numpy as np
-import pandas as pd
 import pmdarima as pm
-from statsmodels.tsa.arima.model import ARIMA
-from statsmodels.tsa.statespace.sarimax import SARIMAX
+from statsmodels.tsa.arima.model import ARIMA, ARIMAResults
+from statsmodels.tsa.statespace.sarimax import SARIMAX, SARIMAXResults
+
 from .base import TimeSeriesModel
-import streamlit as st
+
+
+def _combine(train_data, val_data):
+    """Concatenate train and validation series into one numpy array."""
+    parts = [np.asarray(train_data, dtype=float)]
+    if val_data is not None and len(val_data) > 0:
+        parts.append(np.asarray(val_data, dtype=float))
+    return np.concatenate(parts)
+
+
+def _one_step_predictions(fitted_model, n_fit, test_data):
+    """
+    One-step-ahead predictions and their standard errors over the test period.
+
+    The fitted parameters are kept fixed; the model's state is updated with each
+    actual test observation before predicting the next one, matching how the ML
+    and deep learning models are evaluated.
+    """
+    test_values = np.asarray(test_data, dtype=float)
+    extended = fitted_model.append(test_values, refit=False)
+    prediction = extended.get_prediction(start=n_fit, end=n_fit + len(test_values) - 1)
+    return np.asarray(prediction.predicted_mean), np.asarray(prediction.se_mean)
 
 
 class ARIMAModel(TimeSeriesModel):
@@ -16,147 +37,71 @@ class ARIMAModel(TimeSeriesModel):
         super().__init__(name)
         self.order = None
         self.fitted_model = None
+        self.n_fit = 0
+        self.test_std_errors = None
 
     def build(self, order=None):
         """
         Build ARIMA model with specified or auto-determined order.
 
         Args:
-            order (tuple): ARIMA order (p,d,q)
+            order (tuple): ARIMA order (p,d,q); None selects it automatically by AIC
         """
         self.order = order
         return self
 
-    def auto_order(self, train_data, seasonal=False):
-        """
-        Automatically determine ARIMA order using pmdarima.
-
-        Args:
-            train_data (array-like): Training data
-            seasonal (bool): Whether to include seasonal components
-
-        Returns:
-            tuple: ARIMA order
-        """
-        try:
-            auto_arima = pm.auto_arima(
-                train_data,
-                seasonal=seasonal,
-                stepwise=True,
-                suppress_warnings=True,
-                error_action="ignore",
-                max_order=None,
-                trace=False
-            )
-            return auto_arima.order
-
-        except Exception as e:
-            st.error(f"Error in auto order determination: {str(e)}")
-            return (1, 1, 1)  # default fallback order
+    def auto_order(self, train_data):
+        """Automatically determine ARIMA order using pmdarima."""
+        auto_arima = pm.auto_arima(
+            train_data,
+            seasonal=False,
+            stepwise=True,
+            suppress_warnings=True,
+            error_action="ignore",
+            trace=False
+        )
+        return auto_arima.order
 
     def train(self, train_data, val_data=None, **kwargs):
-        """
-        Train ARIMA model.
+        """Fit ARIMA on train + validation data (there is no early-stopping step)."""
+        data = _combine(train_data, val_data)
+        if self.order is None:
+            self.order = self.auto_order(data)
 
-        Args:
-            train_data (array-like): Training data
-            val_data (array-like): Validation data (not used for ARIMA)
-            **kwargs: Additional arguments
-
-        Returns:
-            self: Trained model
-        """
-        try:
-            if self.order is None:
-                self.order = self.auto_order(train_data)
-
-            self.fitted_model = ARIMA(
-                train_data,
-                order=self.order
-            ).fit()
-
-            return self
-
-        except Exception as e:
-            st.error(f"Error training ARIMA model: {str(e)}")
-            return None
+        self.fitted_model = ARIMA(data, order=self.order).fit()
+        self.n_fit = len(data)
+        return self
 
     def predict(self, steps=1):
-        """
-        Generate predictions.
-
-        Args:
-            steps (int): Number of steps to forecast
-
-        Returns:
-            array-like: Predictions
-        """
-        try:
-            return self.fitted_model.forecast(steps=steps)
-        except Exception as e:
-            st.error(f"Error in ARIMA prediction: {str(e)}")
-            return None
+        """Forecast `steps` periods past the end of the fitted data."""
+        return self.fitted_model.forecast(steps=steps)
 
     def evaluate(self, test_data):
-        """
-        Evaluate model on test data.
-
-        Args:
-            test_data (array-like): Test data
-
-        Returns:
-            dict: Dictionary of evaluation metrics
-        """
-        try:
-            predictions = self.predict(steps=len(test_data))
-            mae = np.mean(np.abs(predictions - test_data))
-            rmse = np.sqrt(np.mean((predictions - test_data) ** 2))
-            mape = np.mean(np.abs((predictions - test_data) / test_data)) * 100
-
-            return {
-                'MAE': mae,
-                'RMSE': rmse,
-                'MAPE': mape
-            }
-
-        except Exception as e:
-            st.error(f"Error evaluating ARIMA model: {str(e)}")
-            return None
+        """Return one-step-ahead predictions for the test period (standard errors are kept
+        in ``test_std_errors`` for prediction intervals)."""
+        predictions, self.test_std_errors = _one_step_predictions(self.fitted_model, self.n_fit, test_data)
+        return predictions
 
     def save(self, path):
-        """
-        Save model to file.
-
-        Args:
-            path (str): Path to save model
-        """
-        if self.fitted_model is not None:
-            try:
-                self.fitted_model.save(path)
-            except Exception as e:
-                st.error(f"Error saving ARIMA model: {str(e)}")
+        """Save model to file."""
+        self.fitted_model.save(path)
 
     def load(self, path):
-        """
-        Load model from file.
-
-        Args:
-            path (str): Path to load model from
-        """
-        try:
-            self.fitted_model = ARIMA.load(path)
-        except Exception as e:
-            st.error(f"Error loading ARIMA model: {str(e)}")
+        """Load model from file."""
+        self.fitted_model = ARIMAResults.load(path)
 
 
 class SARIMAModel(TimeSeriesModel):
     """SARIMA model implementation."""
 
-    def __init__(self, name="SARIMA"):
+    def __init__(self, name="SARIMA", seasonal_period=12):
         super().__init__(name)
+        self.seasonal_period = seasonal_period
         self.order = None
         self.seasonal_order = None
         self.fitted_model = None
+        self.n_fit = 0
+        self.test_std_errors = None
 
     def build(self, order=None, seasonal_order=None):
         """
@@ -171,115 +116,49 @@ class SARIMAModel(TimeSeriesModel):
         return self
 
     def auto_order(self, train_data):
-        """
-        Automatically determine SARIMA orders using pmdarima.
-
-        Args:
-            train_data (array-like): Training data
-
-        Returns:
-            tuple: (order, seasonal_order)
-        """
-        try:
-            auto_arima = pm.auto_arima(
-                train_data,
-                seasonal=True,
-                stepwise=True,
-                suppress_warnings=True,
-                error_action="ignore",
-                max_order=None,
-                trace=False
-            )
-            return auto_arima.order, auto_arima.seasonal_order
-
-        except Exception as e:
-            st.error(f"Error in auto order determination: {str(e)}")
-            return (1, 1, 1), (1, 1, 1, 12)  # default fallback orders
+        """Automatically determine SARIMA orders using pmdarima."""
+        auto_arima = pm.auto_arima(
+            train_data,
+            seasonal=True,
+            m=self.seasonal_period,
+            stepwise=True,
+            suppress_warnings=True,
+            error_action="ignore",
+            trace=False
+        )
+        return auto_arima.order, auto_arima.seasonal_order
 
     def train(self, train_data, val_data=None, **kwargs):
-        """
-        Train SARIMA model.
+        """Fit SARIMA on train + validation data (there is no early-stopping step)."""
+        data = _combine(train_data, val_data)
+        if self.order is None or self.seasonal_order is None:
+            self.order, self.seasonal_order = self.auto_order(data)
 
-        Args:
-            train_data (array-like): Training data
-            val_data (array-like): Validation data (not used for SARIMA)
-            **kwargs: Additional arguments
-
-        Returns:
-            self: Trained model
-        """
-        try:
-            if self.order is None or self.seasonal_order is None:
-                self.order, self.seasonal_order = self.auto_order(train_data)
-
-            self.fitted_model = SARIMAX(
-                train_data,
-                order=self.order,
-                seasonal_order=self.seasonal_order
-            ).fit(disp=False)
-
-            return self
-
-        except Exception as e:
-            st.error(f"Error training SARIMA model: {str(e)}")
-            return None
+        self.fitted_model = SARIMAX(
+            data,
+            order=self.order,
+            seasonal_order=self.seasonal_order
+        ).fit(disp=False)
+        self.n_fit = len(data)
+        return self
 
     def predict(self, steps=1):
-        """
-        Generate predictions.
-
-        Args:
-            steps (int): Number of steps to forecast
-
-        Returns:
-            array-like: Predictions
-        """
-        try:
-            return self.fitted_model.forecast(steps=steps)
-        except Exception as e:
-            st.error(f"Error in SARIMA prediction: {str(e)}")
-            return None
+        """Forecast `steps` periods past the end of the fitted data."""
+        return self.fitted_model.forecast(steps=steps)
 
     def evaluate(self, test_data):
-        """
-        Evaluate model on test data.
-
-        Args:
-            test_data (array-like): Test data
-
-        Returns:
-            dict: Dictionary of evaluation metrics
-        """
-        try:
-            predictions = self.predict(steps=len(test_data))
-            mae = np.mean(np.abs(predictions - test_data))
-            rmse = np.sqrt(np.mean((predictions - test_data) ** 2))
-            mape = np.mean(np.abs((predictions - test_data) / test_data)) * 100
-
-            return {
-                'MAE': mae,
-                'RMSE': rmse,
-                'MAPE': mape
-            }
-
-        except Exception as e:
-            st.error(f"Error evaluating SARIMA model: {str(e)}")
-            return None
+        """Return one-step-ahead predictions for the test period (standard errors are kept
+        in ``test_std_errors`` for prediction intervals)."""
+        predictions, self.test_std_errors = _one_step_predictions(self.fitted_model, self.n_fit, test_data)
+        return predictions
 
     def save(self, path):
         """Save model to file."""
-        if self.fitted_model is not None:
-            try:
-                self.fitted_model.save(path)
-            except Exception as e:
-                st.error(f"Error saving SARIMA model: {str(e)}")
+        self.fitted_model.save(path)
 
     def load(self, path):
         """Load model from file."""
-        try:
-            self.fitted_model = SARIMAX.load(path)
-        except Exception as e:
-            st.error(f"Error loading SARIMA model: {str(e)}")
+        self.fitted_model = SARIMAXResults.load(path)
 
 
 def create_traditional_model(model_type, **kwargs):

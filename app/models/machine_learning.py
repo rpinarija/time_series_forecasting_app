@@ -1,10 +1,10 @@
 """Machine learning model implementations for time series forecasting."""
 
-import numpy as np
-from sklearn.ensemble import RandomForestRegressor
+import pandas as pd
 import xgboost as xgb
+from sklearn.ensemble import RandomForestRegressor
+
 from .base import TimeSeriesModel
-import streamlit as st
 
 
 class RandomForestModel(TimeSeriesModel):
@@ -25,62 +25,53 @@ class RandomForestModel(TimeSeriesModel):
         self.model = RandomForestRegressor(
             n_estimators=self.n_estimators,
             max_depth=self.max_depth,
-            random_state=self.random_state
+            random_state=self.random_state,
+            oob_score=True,
+            n_jobs=-1
         )
         return self
 
     def train(self, train_data, val_data=None, **kwargs):
-        """Train the model."""
-        try:
-            X_train, y_train = train_data
-            self.model.fit(X_train, y_train)
-            return self
-        except Exception as e:
-            st.error(f"Error training Random Forest model: {str(e)}")
-            return None
+        """Train on train + validation data (Random Forest has no early-stopping step)."""
+        X_train, y_train = train_data
+        if val_data is not None and len(val_data[0]) > 0:
+            X_train = pd.concat([X_train, val_data[0]])
+            y_train = pd.concat([y_train, val_data[1]])
+        self.model.fit(X_train, y_train)
+        self._oob_residuals = y_train.to_numpy() - self.model.oob_prediction_
+        return self
+
+    def calibration_residuals(self, val_data=None):
+        """
+        Out-of-sample errors for prediction intervals.
+
+        The forest trains on the validation data, so it uses out-of-bag errors instead:
+        each training row is predicted only by trees that didn't see it.
+        """
+        return self._oob_residuals
 
     def evaluate(self, test_data):
-        """Evaluate model performance."""
-        try:
-            X_test, y_test = test_data
-            predictions = self.model.predict(X_test)
-
-            mae = np.mean(np.abs(predictions - y_test))
-            rmse = np.sqrt(np.mean((predictions - y_test) ** 2))
-            mape = np.mean(np.abs((predictions - y_test) / y_test)) * 100
-
-            return {
-                'MAE': mae,
-                'RMSE': rmse,
-                'MAPE': mape
-            }
-        except Exception as e:
-            st.error(f"Error evaluating Random Forest model: {str(e)}")
-            return None
+        """Return one-step-ahead predictions for the test rows."""
+        X_test, _ = test_data
+        return self.predict(X_test)
 
     def predict(self, X):
         """Generate predictions."""
-        try:
-            return self.model.predict(X)
-        except Exception as e:
-            st.error(f"Error in Random Forest prediction: {str(e)}")
-            return None
+        return self.model.predict(X)
+
+    def feature_importance(self, columns):
+        """Return feature importances as a Series."""
+        return pd.Series(self.model.feature_importances_, index=columns)
 
     def save(self, path):
         """Save model to file."""
-        try:
-            import joblib
-            joblib.dump(self.model, path)
-        except Exception as e:
-            st.error(f"Error saving Random Forest model: {str(e)}")
+        import joblib
+        joblib.dump(self.model, path)
 
     def load(self, path):
         """Load model from file."""
-        try:
-            import joblib
-            self.model = joblib.load(path)
-        except Exception as e:
-            st.error(f"Error loading Random Forest model: {str(e)}")
+        import joblib
+        self.model = joblib.load(path)
 
 
 class XGBoostModel(TimeSeriesModel):
@@ -109,66 +100,42 @@ class XGBoostModel(TimeSeriesModel):
         return self
 
     def train(self, train_data, val_data=None, **kwargs):
-        """Train the model."""
-        try:
-            X_train, y_train = train_data
-            eval_set = [(X_train, y_train)]
+        """Train the model, using the validation data for early stopping when available."""
+        X_train, y_train = train_data
 
-            if val_data is not None:
-                X_val, y_val = val_data
-                eval_set.append((X_val, y_val))
+        if val_data is not None and len(val_data[0]) > 0:
+            self.model.set_params(early_stopping_rounds=10)
+            self.model.fit(X_train, y_train, eval_set=[val_data], verbose=False)
+        else:
+            self.model.set_params(early_stopping_rounds=None)
+            self.model.fit(X_train, y_train, verbose=False)
+        return self
 
-            self.model.fit(
-                X_train, y_train,
-                eval_set=eval_set,
-                early_stopping_rounds=10,
-                verbose=False
-            )
-            return self
-        except Exception as e:
-            st.error(f"Error training XGBoost model: {str(e)}")
-            return None
+    def calibration_residuals(self, val_data):
+        """Errors on the validation data (not used for fitting) for prediction intervals."""
+        X_val, y_val = val_data
+        return y_val.to_numpy() - self.predict(X_val)
 
     def evaluate(self, test_data):
-        """Evaluate model performance."""
-        try:
-            X_test, y_test = test_data
-            predictions = self.model.predict(X_test)
-
-            mae = np.mean(np.abs(predictions - y_test))
-            rmse = np.sqrt(np.mean((predictions - y_test) ** 2))
-            mape = np.mean(np.abs((predictions - y_test) / y_test)) * 100
-
-            return {
-                'MAE': mae,
-                'RMSE': rmse,
-                'MAPE': mape
-            }
-        except Exception as e:
-            st.error(f"Error evaluating XGBoost model: {str(e)}")
-            return None
+        """Return one-step-ahead predictions for the test rows."""
+        X_test, _ = test_data
+        return self.predict(X_test)
 
     def predict(self, X):
         """Generate predictions."""
-        try:
-            return self.model.predict(X)
-        except Exception as e:
-            st.error(f"Error in XGBoost prediction: {str(e)}")
-            return None
+        return self.model.predict(X)
+
+    def feature_importance(self, columns):
+        """Return feature importances as a Series."""
+        return pd.Series(self.model.feature_importances_, index=columns)
 
     def save(self, path):
         """Save model to file."""
-        try:
-            self.model.save_model(path)
-        except Exception as e:
-            st.error(f"Error saving XGBoost model: {str(e)}")
+        self.model.save_model(path)
 
     def load(self, path):
         """Load model from file."""
-        try:
-            self.model.load_model(path)
-        except Exception as e:
-            st.error(f"Error loading XGBoost model: {str(e)}")
+        self.model.load_model(path)
 
 
 def create_ml_model(model_type, **kwargs):

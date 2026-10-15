@@ -17,12 +17,12 @@ class TimeSeriesModel(ABC):
 
     @abstractmethod
     def train(self, train_data, val_data=None, **kwargs):
-        """Train the model."""
+        """Train the model. Each model decides how to use the validation data."""
         pass
 
     @abstractmethod
     def evaluate(self, test_data):
-        """Evaluate the model."""
+        """Return one-step-ahead predictions for the test period (in the target's units)."""
         pass
 
     @abstractmethod

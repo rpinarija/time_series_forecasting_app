@@ -1,10 +1,9 @@
 """Deep learning model implementations."""
 
-import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
+
 from .base import TimeSeriesModel
-import streamlit as st
 
 
 class DeepLearningModel(TimeSeriesModel):
@@ -29,12 +28,23 @@ class DeepLearningModel(TimeSeriesModel):
             train_data,
             epochs=epochs,
             validation_data=val_data,
-            callbacks=callbacks
+            callbacks=callbacks,
+            verbose=0
         )
 
-    def evaluate(self, test_data):
-        """Evaluate the model."""
-        return self.model.evaluate(test_data)
+    def evaluate(self, test_data, scaler=None):
+        """
+        Return one-step-ahead predictions for the test windows.
+
+        Args:
+            test_data (tuple): (X_test, y_test) scaled numpy arrays
+            scaler: Fitted scaler used to convert predictions back to original units
+        """
+        X_test, _ = test_data
+        predictions = self.model.predict(X_test, verbose=0)
+        if scaler is not None:
+            predictions = scaler.inverse_transform(predictions)
+        return predictions.ravel()
 
 
 class SimpleRNNModel(DeepLearningModel):
